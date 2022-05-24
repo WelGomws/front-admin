@@ -68,8 +68,9 @@ export const Station = ({
           </Titles>
           <Titles>
             Itens de acessibilidade:
-            {station.accessibilityItems.map((item: any) => (
+            {station.accessibilityItems.map((item: any, index: number) => (
               <span
+                key={index}
                 style={{
                   margin: "0 5px",
                   background: "#f264ac",

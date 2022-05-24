@@ -67,7 +67,7 @@ export const Lines = () => {
           <AddButton onClick={() => setOpen(true)}>Adicionar</AddButton>
         </div>
         {lines.map((line, index) => (
-          <Line line={line} index={index} />
+          <Line line={line} index={index} key={index} />
         ))}
       </Container>
       <Modal open={open} setOpen={setOpen}>

@@ -31,14 +31,15 @@ export const HomePage = () => {
         <div>
           <span>Listagem das Linhas e estações.</span>
         </div>
-        {linesWithStations.map((item: any) => (
-          <Session>
+        {linesWithStations.map((item: any, index: number) => (
+          <Session key={index}>
             <div>
               <Titles>Linha - {item.name}</Titles>
               <Titles>
                 Estações:
-                {item.stations.map((station: any) => (
+                {item.stations.map((station: any, i: number) => (
                   <span
+                    key={i}
                     style={{
                       margin: "0 5px",
                       background: "#03D361",

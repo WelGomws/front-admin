@@ -9,7 +9,6 @@ import CommentIcon from "@mui/icons-material/Comment";
 import { Title } from "../../styles/style";
 
 export const Comments = () => {
-  const [comments, setComments] = useState([]);
   const [newComments, setNewComments] = useState([]);
   const [aprovedComments, setAprovedsComments] = useState([]);
   const [declinedsComments, setDeclinedsComments] = useState([]);
@@ -35,7 +34,6 @@ export const Comments = () => {
     setDeclinedsComments(
       res.data.filter((comment: any) => comment.reviewed && !comment.active)
     );
-    setComments(res.data);
     return;
   };
 
@@ -60,8 +58,13 @@ export const Comments = () => {
           </SessionTitle>
           <Collapse in={expanded === "news"}>
             {newComments.length ? (
-              newComments.map((comment) => (
-                <CommentItem comment={comment} view setExpanded={setExpanded} />
+              newComments.map((comment, index) => (
+                <CommentItem
+                  key={index}
+                  comment={comment}
+                  view
+                  setExpanded={setExpanded}
+                />
               ))
             ) : (
               <p>Sem comentários novos!</p>
@@ -76,8 +79,12 @@ export const Comments = () => {
             </Icon>
           </SessionTitle>
           <Collapse in={expanded === "aproved"}>
-            {aprovedComments.map((comment) => (
-              <CommentItem comment={comment} setExpanded={setExpanded} />
+            {aprovedComments.map((comment, index) => (
+              <CommentItem
+                key={index}
+                comment={comment}
+                setExpanded={setExpanded}
+              />
             ))}
           </Collapse>
         </Session>
@@ -89,8 +96,12 @@ export const Comments = () => {
             </Icon>
           </SessionTitle>
           <Collapse in={expanded === "descarted"}>
-            {declinedsComments.map((comment) => (
-              <CommentItem comment={comment} setExpanded={setExpanded} />
+            {declinedsComments.map((comment, index) => (
+              <CommentItem
+                key={index}
+                comment={comment}
+                setExpanded={setExpanded}
+              />
             ))}
           </Collapse>
         </Session>
