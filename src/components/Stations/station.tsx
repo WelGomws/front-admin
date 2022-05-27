@@ -82,7 +82,7 @@ export const Station = ({
               </span>
             ))}
           </Titles>
-          <Titles>Adicionada em: {formatDate(station.updatedAt)}</Titles>
+          <Titles>Adicionada em: {formatDate(station.createdAt)}</Titles>
         </div>
         <div>
           <IconButton color="primary" onClick={() => setOpen(true)}>
