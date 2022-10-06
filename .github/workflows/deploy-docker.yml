@@ -1,0 +1,251 @@
+name: deploy-api-docker
+
+on: 
+  workflow_dispatch:
+    inputs:
+      name:
+        type: choice
+        required: true
+        default: 'prod'
+        description: Deploy
+        options: 
+        - prod
+        - hml
+      tag:
+        description: Version
+        required: true
+        type: string
+permissions:
+  contents: write
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  AWS_SG_ID: ${{ secrets.AWS_SG_ID }}
+  HOST_ECR: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  ECR_REPOSITORY_PUBLIC: contractor-public-api
+  IMAGE_TAG: ${{ github.sha}}
+  BUCKET: bucket-container-api-public
+  BUCKET_KEY: container-public.env
+jobs:
+  create-and-push-image-ecr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Verify if image exist in ECR
+        id: ecr
+        run: |
+          sudo apt update
+          sudo apt install jq -y
+          aws ecr describe-images --repository-name ${{ env.ECR_REPOSITORY_PUBLIC }} --image-ids=imageTag=${{ github.sha}} --region ${{secrets.AWS_DEFAULT_REGION }} | jq '.imageDetails[].imageTags[]' -r > images_ids.txt
+          echo "::set-output name=exists::$(for i in $(cat images_ids.txt);do if [ $i = ${{ github.sha}} ]; then echo true;fi;done)"
+      - name: Build, tag, and push image to Amazon ECR
+        if: ${{ success() && !contains(steps.ecr.outputs.exists, true) }}
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY_PUBLIC: ${{ env.ECR_REPOSITORY_PUBLIC}}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_PUBLIC:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_PUBLIC:$IMAGE_TAG
+  deploy:
+    runs-on: ubuntu-latest
+    needs: create-and-push-image-ecr
+    steps:
+      - name: Get IP Runner
+        id: ip
+        uses: haythem/public-ip@v1.2
+      - name: print ip runner
+        run: |
+          echo "ip: "
+          echo ${{ steps.ip.outputs.ipv4}}
+      - name: set enviroment in github runner
+        run: |
+          echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> $GITHUB_ENV
+          echo "AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION" >> $GITHUB_ENV
+          echo "AWS_SG_NAME=$AWS_SG_NAME" >> $GITHUB_ENV
+      - name: Add Github Actions IP to Security group
+        run: |
+          aws ec2 authorize-security-group-ingress --group-id ${{ env.AWS_SG_ID }} --protocol tcp --port 22 --cidr ${{ steps.ip.outputs.ipv4 }}/32    
+      - name: Into With SSH in Prod
+        if: inputs.name == 'prod'
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.AWS_HOST_PUBLIC_PROD }}
+          username: ${{ secrets.AWS_USERNAME }}
+          key: ${{ secrets.AWS_PRIVATE_KEY }}
+          port: 22
+          script: |
+            echo "Start docker"
+            sudo service docker start
+            echo "Stop all containers"
+            sudo docker kill $(sudo docker ps -a -q)
+            echo "Remove all containers"
+            sudo docker container rm $(sudo docker container ls -aq)
+            echo "Login Docker in ECR"
+            sudo aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | sudo docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+            echo "Set last image of container"
+            sudo docker images -q | head -n 1 > .LAST_IMAGE_ID_CONTAINER
+            cat .LAST_IMAGE_ID_CONTAINER
+            echo "Stop last container"
+            sudo docker kill $(sudo docker ps --filter ancestor=$(head .LAST_IMAGE_ID_CONTAINER) -q )
+            echo "Pull Image from ECR"
+            sudo docker pull ${{env.HOST_ECR}}/${{env.ECR_REPOSITORY_PUBLIC}}:${{env.IMAGE_TAG}}
+            echo "Set actual image of container"
+            sudo docker images -q | head -n 1 > .ACTUAL_IMAGE_ID_CONTAINER
+            cat .ACTUAL_IMAGE_ID_CONTAINER
+            echo "Get enviroments from bucket"
+            sudo aws s3 cp s3://${{ env.BUCKET }}/${{ env.BUCKET_KEY }} .env
+            echo "Set enviroment port"
+            for i in $(cat .env);do if [[ "$i" == *"APP_PORT"* ]] ; then export $i;fi; done
+            echo "Run Container"
+            sudo docker run -p $(echo $APP_PORT):$(echo $APP_PORT) --name container-public-api-docker-prod-$(head .ACTUAL_IMAGE_ID_CONTAINER) -d --restart on-failure --env-file .env --log-driver=awslogs --log-opt awslogs-region=${{env.AWS_DEFAULT_REGION}} --log-opt awslogs-group=/aws/ec2/container-public-api-docker-prod --log-opt awslogs-create-group=true --log-opt tag='SUCCESS/IMAGE-{{.ImageName}}/CONTAINER_NAME-{{.Name}}/CONTAINER_ID-{{.ID}}' --log-opt awslogs-datetime-format='\[%b %d, %Y %H:%M:%S\]' $(head .ACTUAL_IMAGE_ID_CONTAINER)
+            echo "Set last container id"
+            sudo docker ps -l -q > .LAST_CONTAINER_ID_CONTAINER
+            cat .LAST_CONTAINER_ID_CONTAINER
+
+      - name: Into With SSH in Hml
+        if: inputs.name == 'hml'
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.AWS_HOST_PUBLIC_HML }}
+          username: ${{ secrets.AWS_USERNAME }}
+          key: ${{ secrets.AWS_PRIVATE_KEY }}
+          port: 22
+          script: |
+            echo "Start docker"
+            sudo service docker start
+            echo "Stop all containers"
+            sudo docker kill $(sudo docker ps -a -q)
+            echo "Remove all containers"
+            sudo docker container rm $(sudo docker container ls -aq)
+            echo "Login Docker in ECR"
+            sudo aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | sudo docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+            echo "Set last image of container"
+            sudo docker images -q | head -n 1 > .LAST_IMAGE_ID_CONTAINER
+            cat .LAST_IMAGE_ID_CONTAINER
+            echo "Stop last container"
+            sudo docker kill $(sudo docker ps --filter ancestor=$(head .LAST_IMAGE_ID_CONTAINER) -q )
+            echo "Pull Image from ECR"
+            sudo docker pull ${{env.HOST_ECR}}/${{env.ECR_REPOSITORY_PUBLIC}}:${{env.IMAGE_TAG}}
+            echo "Set actual image of container"
+            sudo docker images -q | head -n 1 > .ACTUAL_IMAGE_ID_CONTAINER
+            cat .ACTUAL_IMAGE_ID_CONTAINER
+            echo "Get enviroments from bucket"
+            sudo aws s3 cp s3://${{ env.BUCKET }}/${{ env.BUCKET_KEY }} .env
+            echo "Set enviroment port"
+            for i in $(cat .env);do if [[ "$i" == *"APP_PORT"* ]] ; then export $i;fi; done
+            echo "Run Container"
+            sudo docker run -p $(echo $APP_PORT):$(echo $APP_PORT) --name contractor-public-api-docker-hml-$(head .ACTUAL_IMAGE_ID_CONTAINER) -d --restart on-failure --env-file .env --log-driver=awslogs --log-opt awslogs-region=${{env.AWS_DEFAULT_REGION}} --log-opt awslogs-group=/aws/ec2/container-public-api-docker-hml --log-opt awslogs-create-group=true --log-opt tag='SUCCESS/IMAGE-{{.ImageName}}/CONTAINER_NAME-{{.Name}}/CONTAINER_ID-{{.ID}}' --log-opt awslogs-datetime-format='\[%b %d, %Y %H:%M:%S\]' $(head .ACTUAL_IMAGE_ID_CONTAINER)
+            echo "Set last container id"
+            sudo docker ps -l -q > .LAST_CONTAINER_ID_CONTAINER
+            cat .LAST_CONTAINER_ID_CONTAINER
+      
+            
+      - name: Remove Github Actions IP from security group
+        if: failure() || success()
+        run: |
+          aws ec2 revoke-security-group-ingress --group-id ${{ env.AWS_SG_ID }} --protocol tcp --port 22 --cidr ${{ steps.ip.outputs.ipv4 }}/32
+      - name: End to deploy
+        run: |
+          echo "end to deploy"
+  test-and-rollback:
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Get IP Runner
+        id: ip
+        uses: haythem/public-ip@v1.2
+      - name: print ip runner
+        run: |
+          echo "ip: "
+          echo ${{ steps.ip.outputs.ipv4}}
+      - name: set enviroment in github runner
+        run: |
+          echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> $GITHUB_ENV
+          echo "AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION" >> $GITHUB_ENV
+          echo "AWS_SG_NAME=$AWS_SG_NAME" >> $GITHUB_ENV
+      - name: Add Github Actions IP to Security group
+        run: |
+          aws ec2 authorize-security-group-ingress --group-id ${{ env.AWS_SG_ID }} --protocol tcp --port 22 --cidr ${{ steps.ip.outputs.ipv4 }}/32    
+      - name: Into With SSH in Prod
+        if: inputs.name == 'prod'
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.AWS_HOST_PUBLIC_PROD }}
+          username: ${{ secrets.AWS_USERNAME }}
+          key: ${{ secrets.AWS_PRIVATE_KEY }}
+          script: |
+            echo "Set enviroment port"
+            for i in $(cat .env);do if [[ "$i" == *"APP_PORT"* ]] ; then export $i;fi; done
+            echo "Test Health"
+            if [ $(curl -s -o /dev/null -w '%{http_code}' http://localhost:$(echo $APP_PORT)/api) != 200 ];then sudo docker stop $(head .LAST_CONTAINER_ID_CONTAINER);sudo docker run -d --restart on-failure -p $(echo $APP_PORT):$(echo $APP_PORT) --name container-public-api-docker-prod-rollback-$(head .ACTUAL_IMAGE_ID_CONTAINER) --env-file .env --log-driver=awslogs --log-opt awslogs-region=${{env.AWS_DEFAULT_REGION}} --log-opt awslogs-group=/aws/ec2/container-public-api-docker-prod --log-opt awslogs-create-group=true --log-opt tag='ROLLBACK/IMAGE-{{.ImageName}}/CONTAINER_NAME-{{.Name}}/CONTAINER_ID-{{.ID}}' --log-opt awslogs-datetime-format='\[%b %d, %Y %H:%M:%S\]' $(head .LAST_IMAGE_ID_CONTAINER);echo "Activate Rollback";fi
+            echo "End Test"
+            echo "Clear last images"
+            for i in $(sudo docker images -q);do if [ $i != $(head .LAST_IMAGE_ID_CONTAINER) ] && [ $i != $(head .ACTUAL_IMAGE_ID_CONTAINER) ]; then sudo docker rmi -f $i;fi;done 
+      
+      - name: Into With SSH in Hml
+        if: inputs.name == 'hml'
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.AWS_HOST_PUBLIC_HML }}
+          username: ${{ secrets.AWS_USERNAME }}
+          key: ${{ secrets.AWS_PRIVATE_KEY }}
+          script: |
+            echo "Set enviroment port"
+            for i in $(cat .env);do if [[ "$i" == *"APP_PORT"* ]] ; then export $i;fi; done
+            echo "Test Health"
+            if [ $(curl -s -o /dev/null -w '%{http_code}' http://localhost:$(echo $APP_PORT)/api) != 200 ];then sudo docker stop $(head .LAST_CONTAINER_ID_CONTAINER);sudo docker run -d --restart on-failure -p $(echo $APP_PORT):$(echo $APP_PORT) --name container-public-api-docker-hml-rollback-$(head .ACTUAL_IMAGE_ID_CONTAINER) --env-file .env --log-driver=awslogs --log-opt awslogs-region=${{env.AWS_DEFAULT_REGION}} --log-opt awslogs-group=/aws/ec2/container-public-api-docker-hml --log-opt awslogs-create-group=true --log-opt tag='ROLLBACK/IMAGE-{{.ImageName}}/CONTAINER_NAME-{{.Name}}/CONTAINER_ID-{{.ID}}' --log-opt awslogs-datetime-format='\[%b %d, %Y %H:%M:%S\]' $(head .LAST_IMAGE_ID_CONTAINER);echo "Activate Rollback";fi
+            echo "End Test"
+            echo "Clear last images"
+            for i in $(sudo docker images -q);do if [ $i != $(head .LAST_IMAGE_ID_CONTAINER) ] && [ $i != $(head .ACTUAL_IMAGE_ID_CONTAINER) ]; then sudo docker rmi -f $i;fi;done 
+      - name: Remove Github Actions IP from security group
+        if: failure() || success()
+        run: |
+          aws ec2 revoke-security-group-ingress --group-id ${{ env.AWS_SG_ID }} --protocol tcp --port 22 --cidr ${{ steps.ip.outputs.ipv4 }}/32
+  test-postman:
+    runs-on: ubuntu-latest
+    needs: test-and-rollback
+    steps:
+      - name: Run API Tests
+        id: run-newman
+        uses: anthonyvscode/newman-action@v1
+        with:
+          apiKey: ${{ secrets.POSTMAN_APIKEY }}
+          collection: ${{ secrets.POSTMAN_COLLECTION_ID }}
+          environment: "69bb00a5-d20f-4677-bd90-4c4077796acc"
+          reporters: cli
+      - name: Output summary to console
+        run: echo ${{ steps.run-newman.outputs.summary }}
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: test-and-rollback
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Get branch name
+        id: branch
+        uses: tj-actions/branch-names@v5.2
+      - name: Create Release
+        if: success() && !contains(inputs.tag,'rollback')
+        id: release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{inputs.name}}-${{inputs.tag}}
+      - name: Get Url release
+        if: success() && !contains(inputs.tag,'rollback')
+        run: echo ${{ steps.release.outputs.url }} 
