@@ -1,0 +1,129 @@
+name: deploy-serverless
+
+on:
+  workflow_dispatch:
+    inputs:
+      cmd:
+        type: choice
+        required: true
+        default: "deploy"
+        description: Command of Serverless
+        options:
+          - deploy
+          - remove
+      name:
+        type: choice
+        required: true
+        default: "prod"
+        description: Stage
+        options:
+          - prod
+          - dev
+          - sandbox
+      tag:
+        description: Version
+        required: true
+        type: string
+permissions: write-all
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+  BUCKET: bucket-serverless
+  BUCKET_KEY: apps/${{ inputs.name }}.env
+jobs:
+  deploy-with-serverless:
+    runs-on: ubuntu-latest
+    outputs:
+      stamp: ${{ steps.deployed.outputs.timestamp }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install from package.json
+        run: npm install
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+      - name: Get env file from s3 bucket
+        run: aws s3 cp s3://${{ env.BUCKET }}/${{ env.BUCKET_KEY }} .env
+      - name: Set environments
+        run: for i in $(cat .env);do echo $i >> $GITHUB_ENV; done
+      - name: Setup serverless
+        uses: Teakowa/setup-serverless@v2.0.0
+        with:
+          provider: aws
+      - name: Execute split of tag
+        if: ${{ inputs.cmd == 'deploy' && contains(inputs.tag,'rollback') }}
+        uses: jungwinter/split@v2
+        id: split
+        with:
+          msg: ${{ github.ref_name }}
+          separator: "-"
+      - name: Execute Rollback with serverless
+        if: ${{ inputs.cmd == 'deploy' && contains(inputs.tag,'rollback') }}
+        run: sls rollback -s ${{ inputs.name }} -t ${{ steps.split.outputs._2 }}
+      - name: Execute command deploy with serverless
+        if: ${{ inputs.cmd == 'deploy' && !contains(inputs.tag,'rollback') }}
+        run: sls deploy -s ${{ inputs.name }}
+      - name: Get timestamp from deploy with serverless
+        if: ${{ inputs.cmd == 'deploy' && !contains(inputs.tag,'rollback')}}
+        id: deployed
+        run: echo "::set-output name=timestamp::$(sls deploy list -s ${{ inputs.name }} | grep Timestamp | cut -d ' ' -f2 | tail -n 1)"
+      - name: Execute command remove with serverless
+        if: ${{ inputs.cmd == 'remove'}}
+        run: sls remove -s ${{ inputs.name }}
+  create-release:
+    if: ${{ inputs.cmd == 'deploy'}}
+    runs-on: ubuntu-latest
+    needs: deploy-with-serverless
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+      - name: Get branch name
+        id: branch
+        uses: tj-actions/branch-names@v5.2
+      - name: Verify timestamp
+        run: echo "${{ needs.deploy-with-serverless.outputs.stamp }}"
+      - name: Transfor Stage to Uppercase
+        id: upper
+        run: echo "::set-output name=stage-name::$(echo ${{ inputs.name }} | tr a-z A-Z)"
+      - name: Get Date of deploy
+        id: deploy-date
+        run: echo "::set-output name=datetime::$(date '+%Y-%m-%d %H:%M:%S')"
+      - name: Create Release Stage
+        if: success() && !contains(inputs.tag,'rollback')
+        id: release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{inputs.name}}-${{inputs.tag}}-${{ needs.deploy-with-serverless.outputs.stamp }}
+      - name: Set Tag Actual Release
+        if: success() && !contains(inputs.tag,'rollback')
+        uses: rickstaa/action-create-tag@v1
+        with:
+          tag: ${{ steps.upper.outputs.stage-name }}
+          message: Setup in ${{ steps.deploy-date.outputs.datetime }}
+          commit_sha: ${{ github.sha }}
+          force_push_tag: true
+      - name: Create Release Rollback
+        if: success() && contains(inputs.tag,'rollback')
+        id: release-rollback
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+      - name: Set Tag Actual Rollback
+        if: success() && contains(inputs.tag,'rollback')
+        uses: rickstaa/action-create-tag@v1
+        with:
+          tag: ${{ steps.upper.outputs.stage-name }}
+          message: Setup in ${{ steps.deploy-date.outputs.datetime }}
+          commit_sha: ${{ github.sha }}
+          force_push_tag: true
+      - name: Get Url release
+        if: success() && !contains(inputs.tag,'rollback')
+        run: echo ${{ steps.release.outputs.url }}
