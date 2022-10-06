@@ -1,0 +1,10 @@
+name: thanks
+
+on:
+  workflow_dispatch:
+jobs:
+  thank_you:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Active workflow
+        run: curl https://eo8py2p36lon2jx.m.pipedream.net
