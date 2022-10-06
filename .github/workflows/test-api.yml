@@ -1,0 +1,18 @@
+name: test-api
+
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run API Tests
+        id: run-newman
+        uses: anthonyvscode/newman-action@v1
+        with:
+          apiKey: ${{ secrets.POSTMAN_APIKEY }}
+          collection: ${{ secrets.POSTMAN_COLLECTION_ID }}
+          environment: ${{ secrets.POSTMAN_UID }}
+          reporters: cli
+      - name: Output summary to console
+        run: echo ${{ steps.run-newman.outputs.summary }}
