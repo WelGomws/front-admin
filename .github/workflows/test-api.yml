@@ -12,7 +12,6 @@ jobs:
         with:
           apiKey: ${{ secrets.POSTMAN_APIKEY }}
           collection: ${{ secrets.POSTMAN_COLLECTION_ID }}
-          environment: ${{ secrets.POSTMAN_UID }}
           reporters: cli
       - name: Output summary to console
         run: echo ${{ steps.run-newman.outputs.summary }}
